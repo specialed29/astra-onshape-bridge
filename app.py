@@ -509,8 +509,11 @@ async def download_export(request: Request):
             "X-Content-SHA256": metadata["sha256"],
         })
         return Response(data, media_type="application/step", headers=headers)
-    except (ValueError, KeyError):
-        return JSONResponse({"error": "Invalid export identifier, unsupported redirect/file, or file exceeds 32 MiB."},
+    except ValueError as error:
+        return JSONResponse({"error": str(error)},
+                            status_code=422, headers=headers)
+    except KeyError:
+        return JSONResponse({"error": "Translation metadata is incomplete."},
                             status_code=422, headers=headers)
     except RuntimeError as error:
         return JSONResponse({"error": str(error)}, status_code=502, headers=headers)

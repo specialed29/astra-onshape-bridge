@@ -42,12 +42,14 @@ def credential_target(url: str, base: str) -> bool:
     if ((u.hostname or "").endswith(".amazonaws.com")
             and ("X-Amz-Signature" in parse_qs(u.query) or "Signature" in parse_qs(u.query))):
         return False
-    raise ValueError("Export redirected to an unsupported host; no credentials were forwarded.")
+    raise ValueError(f"Export redirected to unsupported host {u.hostname}; no credentials were forwarded.")
 
 
 def validate_step(data: bytes) -> dict:
     """Envelope check, not a geometric-kernel certification."""
     stripped = data.strip()
+    if stripped.startswith(b"PK"):
+        raise ValueError("Onshape returned a ZIP archive instead of a plain STEP file.")
     if (not stripped.startswith(b"ISO-10303-21;")
             or not stripped.endswith(b"END-ISO-10303-21;")
             or b"FILE_SCHEMA" not in stripped or b"DATA;" not in stripped):
