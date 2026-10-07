@@ -20,9 +20,10 @@ from fastmcp import FastMCP
 from fastmcp.server.auth import StaticTokenVerifier
 from openai import APIStatusError, APITimeoutError, AsyncOpenAI
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 import approvals
 import cad
+import step_export
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent
@@ -35,8 +36,9 @@ READ_TOOLS = [
 MODELING_WRITE_TOOLS = [
     "create_document", "create_partstudio", "create_rectangle_sketch",
     "create_circle_sketch", "extrude_sketch", "set_feature_dimension",
+    "export_partstudio_step",
 ]
-WRITE_TOOLS = MODELING_WRITE_TOOLS + ["add_feature_raw", "export_partstudio_step"]
+WRITE_TOOLS = MODELING_WRITE_TOOLS + ["add_feature_raw"]
 READ_ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False}
 
 
@@ -381,18 +383,31 @@ async def export_partstudio_step(
     element_id: str,
     store_in_document: bool = False,
 ) -> Any:
-    """Start an asynchronous STEP export of a Part Studio."""
-    return await onshape_request(
+    """WRITE/job: export the explicit Part Studio as STEP, without changing CAD.
+
+    store_in_document must be false. Poll get_translation until DONE or FAILED.
+    DONE returns authenticated download descriptors; never claim a file exists
+    just because a job started. Download does not expose provider credentials.
+    """
+    require_modeling()
+    if store_in_document:
+        raise ValueError("Only external STEP files are supported; store_in_document must be false.")
+    result = await onshape_request(
         "POST",
-        f"/api/v10/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/export/step",
-        body={"storeInDocument": store_in_document, "stepUnit": "MILLIMETER"},
+        studio_path(document_id, workspace_id, element_id) + "/export/step",
+        body={"storeInDocument": False, "stepUnit": "MILLIMETER"},
     )
+    result["downloads"] = step_export.descriptors(result)
+    result["onshape_url"] = onshape_link(document_id, workspace_id, element_id)
+    return result
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
 async def get_translation(translation_id: str) -> Any:
     """Check the state of an Onshape asynchronous export/translation. READ ONLY."""
-    return await onshape_request("GET", f"/api/v10/translations/{translation_id}")
+    result = await onshape_request("GET", f"/api/v10/translations/{cad.cad_id(translation_id)}")
+    result["downloads"] = step_export.descriptors(result)
+    return result
 
 
 def public_base(request: Request) -> str | None:
@@ -460,6 +475,47 @@ def chat_authorized(request: Request) -> bool:
     expected = os.getenv("CHAT_BEARER_TOKEN") or mcp_token()
     supplied = request.headers.get("authorization", "")
     return hmac.compare_digest(supplied.encode(), f"Bearer {expected}".encode())
+
+
+@mcp.custom_route("/api/exports/{translation_id}/{file_index}", methods=["GET"])
+async def download_export(request: Request):
+    """Authenticated bytes only. No public capability URL or credentials in URLs."""
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    if not chat_authorized(request):
+        return JSONResponse({"error": "Chat bearer token required."}, status_code=401, headers=headers)
+    try:
+        tid = cad.cad_id(request.path_params["translation_id"])
+        index = int(request.path_params["file_index"])
+        if index < 0:
+            raise ValueError("Invalid file index.")
+        result = await get_translation(tid)
+        state = result.get("requestState")
+        if state != "DONE":
+            return JSONResponse({"error": "Translation failed." if state == "FAILED" else "Translation is not complete.",
+                                 "requestState": state}, status_code=409, headers=headers)
+        ids = result.get("resultExternalDataIds") or []
+        if index >= len(ids):
+            return JSONResponse({"error": "External result not found."}, status_code=404, headers=headers)
+        did = cad.cad_id(result["documentId"])
+        fid = cad.cad_id(ids[index])
+        data = await step_export.download(
+            BASE, f"/api/v10/documents/d/{did}/externaldata/{fid}",
+            os.environ["ONSHAPE_ACCESS_KEY"], os.environ["ONSHAPE_SECRET_KEY"],
+            os.getenv("ONSHAPE_AUTH_MODE", "hmac").lower(), sign_onshape_request,
+        )
+        metadata = step_export.validate_step(data)
+        headers.update({
+            "Content-Disposition": f'attachment; filename="{step_export.filename(result.get("name") or "Onshape-export")}"',
+            "X-Content-SHA256": metadata["sha256"],
+        })
+        return Response(data, media_type="application/step", headers=headers)
+    except (ValueError, KeyError):
+        return JSONResponse({"error": "Invalid export identifier, unsupported redirect/file, or file exceeds 32 MiB."},
+                            status_code=422, headers=headers)
+    except RuntimeError as error:
+        return JSONResponse({"error": str(error)}, status_code=502, headers=headers)
+    except Exception:
+        return JSONResponse({"error": "Export download failed; inspect service diagnostics."}, status_code=502, headers=headers)
 
 
 @mcp.custom_route("/api/diagnostics/onshape", methods=["GET"])
@@ -559,8 +615,13 @@ async def chat(request: Request):
             "Ask for missing dimensions or material details, never silently invent a design. "
             "For a new part, create a PRIVATE document unless the user explicitly requests public visibility, "
             "then list its elements and use the default Part Studio. Never alter unrelated existing documents. "
-            "Use rectangular/circular sketches and NEW extrusions. No cuts, fillets, holes, assemblies or STEP "
-            "downloads are available in this initial modeling set; clearly state those limitations. "
+            "Use rectangular/circular sketches and NEW extrusions. Cuts, fillets, holes and assemblies are not available. "
+            "STEP export is available: export_partstudio_step requires approval, with store_in_document=false. "
+            "It exports all parts in the explicitly selected Part Studio without changing its feature tree. "
+            "Poll get_translation at most three times per response; if still ACTIVE, report the translation ID "
+            "and ask the user to check again rather than starting another job. Stop on FAILED. "
+            "When DONE, the UI displays authenticated download buttons from the downloads descriptors. "
+            "Do not invent download URLs or claim a file has been downloaded or geometrically validated until verified. "
             "Use set_feature_dimension for dimensional edits. Inspect features and actual geometry after writes. "
             "Never automatically retry a timed-out or failed mutation: inspect the target first. "
             "If an operation is denied, stop that operation; do not propose it again unless the user re-requests it."
@@ -617,6 +678,7 @@ async def chat(request: Request):
             item["effective_arguments"] = {**defaults, **arguments}
         approval_token = approvals.register(r.id, requested) if requested else None
         links = []
+        downloads = []
         for item in r.output:
             if item.type == "mcp_call" and getattr(item, "output", None):
                 try:
@@ -624,6 +686,9 @@ async def chat(request: Request):
                     url = output.get("onshape_url") if isinstance(output, dict) else None
                     if url and url.startswith(BASE + "/documents/"):
                         links.append(url)
+                    if isinstance(output, dict):
+                        # Reconstruct paths from provider translation data, never model prose.
+                        downloads.extend(step_export.descriptors(output))
                 except (ValueError, TypeError):
                     pass
         return JSONResponse({
@@ -631,6 +696,7 @@ async def chat(request: Request):
             "imported_tools": imported, "tool_calls": calls,
             "approval_requests": requested, "approval_token": approval_token,
             "onshape_links": list(dict.fromkeys(links)),
+            "downloads": list({d["download_path"]: d for d in downloads}.values()),
         })
     except APIStatusError as e:
         return JSONResponse(

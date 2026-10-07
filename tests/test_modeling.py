@@ -128,7 +128,8 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(tool["require_approval"], {"never": {"tool_names": app.READ_TOOLS}})
         self.assertEqual(tool["allowed_tools"], app.READ_TOOLS + app.MODELING_WRITE_TOOLS)
         self.assertNotIn("add_feature_raw", tool["allowed_tools"])
-        self.assertNotIn("export_partstudio_step", tool["allowed_tools"])
+        self.assertIn("export_partstudio_step", tool["allowed_tools"])
+        self.assertNotIn("export_partstudio_step", app.READ_TOOLS)
         self.assertEqual(response["approval_requests"][0]["effective_arguments"],
                          {"name": "Test part", "is_public": False})
         self.assertEqual(len(self.requests), 1)  # No continuation, therefore no execution.

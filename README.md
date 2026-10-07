@@ -21,8 +21,9 @@ Review tokens expire after 30 minutes or a service restart. Do not run multiple 
 | `extrude_sketch` | All closed regions of a specified sketch into NEW solids, with explicit depth in mm |
 | `set_feature_dimension` | Bridge sketch width/height/diameter or NEW/BLIND extrusion depth; retains feature ID |
 | `inspect_partstudio_geometry` | Read-only actual parts, bounding boxes, and mass properties |
+| `export_partstudio_step` | Review-controlled STEP export of all parts in the selected Part Studio; external file only |
 
-The other six read-only tools remain available. `add_feature_raw` and `export_partstudio_step` remain outside the browser toolset; raw writes require a second independent `ENABLE_RAW_FEATURE_WRITES=true` operator setting and are disabled by default. Cut/add/intersect operations, holes, fillets, arbitrary drawings, assemblies, materials, and STEP downloads are not exposed by this modeling release.
+The other six read-only tools remain available. `add_feature_raw` remains outside the browser toolset; raw writes require a second independent `ENABLE_RAW_FEATURE_WRITES=true` operator setting and are disabled by default. Cut/add/intersect operations, holes, fillets, arbitrary drawings, assemblies, and materials are not exposed by this modeling release.
 
 New feature writes read the current `sourceMicroversion` and use `rejectMicroversionSkew=true` to reject intervening changes. HTTP success is not geometric success: tools report `ok=true` only when the returned feature state is `OK`, and the assistant is instructed to inspect real geometry afterward. A failed feature can still exist in the feature tree; it is never silently deleted or re-created.
 
@@ -30,7 +31,7 @@ Refresh the browser and start **New conversation** after deployment so earlier r
 
 ## Server safety switches
 
-With `ENABLE_CAD_WRITES=false`, the browser is read-only and all Onshape non-GET requests are blocked. With `ENABLE_CAD_WRITES=true`, browser chat imports the six typed modeling mutations and requires approval for every one; read tools do not require approval. A prompt is not an authorization boundary.
+With `ENABLE_CAD_WRITES=false`, the browser is read-only and all Onshape non-GET requests are blocked. With `ENABLE_CAD_WRITES=true`, browser chat imports six typed modeling mutations plus STEP export and requires approval for every one; read tools do not require approval. Previously completed files can still be downloaded with chat authentication when writes are disabled. A prompt is not an authorization boundary.
 
 The MCP bearer token is an operator credential: a separate trusted MCP client using it directly can invoke enabled mutations without going through this browser's approval UI. Do not give that token to untrusted clients or embed it in the browser. The browser uses only the separate chat token, while OpenAI applies the configured MCP approval policy.
 
@@ -148,7 +149,7 @@ In the Responses tool configuration, `authorization` is the **raw token**, witho
 
 Read-only: `onshape_health`, `search_documents`, `get_document`, `list_elements`, `get_partstudio_features`, `get_translation`, `inspect_partstudio_geometry`.
 
-Typed mutations are listed above. Legacy operator-only tools: `add_feature_raw`, `export_partstudio_step`.
+Typed mutations and STEP export are listed above. Legacy operator-only tool: `add_feature_raw`.
 
 Document search supports `offset` and `limit`, with page size capped at the verified 20 items. Do not mistake one returned page for the entire account; request subsequent pages with offsets 20, 40, and so on.
 
@@ -170,19 +171,18 @@ Document search supports `offset` and `limit`, with page size capped at the veri
 
 HMAC signs the exact encoded pathname and query, includes a trailing newline, uses a fresh nonce and HTTP Date, and lowercases the canonical string. Basic API-key auth is supported by Onshape for local testing, so a failure must not be attributed to Basic auth merely because it is Basic. See [Onshape API-key authentication](https://onshape-public.github.io/docs/auth/apikeys/).
 
-Redirects are not followed automatically: a signed redirect needs a newly validated target and a fresh signature. This especially matters for future file downloads.
+JSON requests never follow redirects automatically. File download redirects are bounded and checked separately as described below.
 
-## STEP follow-up
+## STEP export and authenticated download
 
 The existing format-specific STEP export endpoint is valid in the published API: `POST /partstudios/d/{did}/{wv}/{wvid}/e/{eid}/export/step`. It initiates asynchronous translation, not a file download. See [Onshape import/export documentation](https://onshape-public.github.io/docs/api-adv/translation/).
 
-After explicit authorization for a disposable test document, the next commissioning phase should:
+After refreshing chat and starting a new conversation, ask: “Export this Part Studio as STEP without changing geometry or adding tabs,” and provide the exact Onshape URL. Review the export target and `store_in_document=false` before approving.
 
-1. Commission the typed sketch/extrusion/edit tools on a disposable document.
-2. Verify feature states, actual part geometry, and dimensional updates.
-3. Extend the review-controlled toolset for the next requested part's features.
-4. Start STEP export with `storeInDocument=false` unless a new blob tab is explicitly wanted.
-5. Poll translation to `DONE`, handle `FAILED`, retrieve the resulting external data or blob, safely re-sign redirects, and stream bytes instead of truncating text into a tool response.
-6. Validate the STEP payload and provide an authenticated download.
+1. `export_partstudio_step` creates one external STEP translation with millimeter units. `store_in_document=true` is rejected; no blob tab is created.
+2. `get_translation` returns `ACTIVE`, `DONE`, or `FAILED`. The model polls at most three times in a response; an active job can be checked again by ID without creating another job.
+3. A completed translation returns download descriptors. Chat renders **Download STEP** buttons that fetch `GET /api/exports/{translation_id}/{file_index}` with the chat bearer in a header, never a URL.
+4. The route rechecks completion, resolves the external data ID server-side, reads binary chunks with a 32 MiB limit, and checks the STEP Part 21 envelope. It returns an attachment with SHA-256, `Cache-Control: no-store`, and `nosniff`. Raw CAD data never enters model tool output.
+5. Redirects are limited to four requests. Only the configured Onshape origin receives freshly signed HMAC or Basic auth. Presigned `*.amazonaws.com` storage is fetched without Onshape credentials; all other cross-origin redirects fail closed. ZIP files are not supported by this initial download route.
 
-Do not run this phase during the read-only test.
+The server's envelope check is not a geometric-kernel validation. Commission exported sample files using an independent STEP reader, checking topology, bounds, volume, and units. Files are not persisted by the bridge; browser downloads are fetched on demand. Exports contain B-rep geometry, not the editable Onshape feature history.

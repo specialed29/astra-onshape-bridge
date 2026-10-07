@@ -27,8 +27,8 @@ a{color:#b7cfff}:focus-visible{outline:2px solid #b7cfff;outline-offset:3px}
 <a href="/mcp-info" target="_blank" rel="noopener">MCP diagnostics</a></div>
 <p id="status" class="muted" role="status">Service not checked.</p></div>
 <section id="review" class="review" aria-labelledby="review-title" hidden>
-<h2 id="review-title">Review CAD write</h2>
-<p>This will change the connected Onshape account. Check the document, workspace, Part Studio, dimensions, and visibility before approving. Nothing in this request has executed yet.</p>
+<h2 id="review-title">Review CAD operation</h2>
+<p>This will modify CAD or start an export job. STEP export includes all parts in the selected Part Studio without changing its features. Check target IDs, dimensions, and visibility before approving. Nothing in this request has executed yet.</p>
 <div id="review-items"></div>
 <div class="row"><button id="approve" type="button">Approve reviewed operation</button><button id="deny" type="button">Deny operation</button></div>
 <p class="muted">Each approval is single-use and expires after 30 minutes or a server restart. A new write requires another review. If a write times out, inspect Onshape before retrying.</p>
@@ -62,7 +62,7 @@ async function checkService(){
  try{const r=await fetch(API_BASE+'/health',{signal:AbortSignal.timeout(90000)});const j=await jsonResponse(r);
  if(!r.ok)throw new Error(`HTTP ${r.status}`);
  status.textContent=`App: ${j.app?'online':'unavailable'} · Config: ${j.configured?'present (credentials not yet verified)':'missing'} · Model: ${j.model} · FastMCP: ${j.fastmcp_version||'not reported (old deployment)'}`;
- document.getElementById('mode').textContent=j.writes_enabled?'Typed modeling enabled: rectangle/circle sketches, new solid extrusions, and dimensional edits. Every write requires review; raw feature writes are not available in this chat.':'Read-only mode. CAD writes are currently disabled on the server.';
+ document.getElementById('mode').textContent=j.writes_enabled?'Typed modeling and STEP export enabled. Sketches, extrusions, edits, and export jobs require review. Completed STEP files download securely with your chat token.':'Read-only mode. CAD writes and new export jobs are currently disabled on the server.';
  }catch(e){status.textContent='Health check failed: '+e.message;}
 }
 document.getElementById('check').onclick=checkService;
@@ -76,12 +76,32 @@ async function requestChat(payload,restoreMessage=''){
  append(j.text||(j.approval_token?'Awaiting your review. No pending write has executed.':'No text returned. Inspect the tool status.'));
  if(j.tool_calls?.length)append('Tool status: '+j.tool_calls.map(t=>`${t.name}: ${t.error?'error':t.status||'completed'}`).join(', '));
  for(const url of j.onshape_links||[]){try{const u=new URL(url);if(u.protocol==='https:'&&u.hostname.endsWith('.onshape.com')){const a=document.createElement('a');a.href=url;a.textContent='Open in Onshape';a.target='_blank';a.rel='noopener noreferrer';a.className='link';log.appendChild(a);}}catch{}}
+ for(const file of j.downloads||[])addDownload(file);
  displayApproval(j);
  }catch(e){
   append('Request failed: '+e.message+(payload.approval_token?' This approval will not be retried automatically. Inspect Onshape before requesting another write.':''));
   if(payload.approval_token){approvalToken=null;review.hidden=true;prev=null;}
   else q.value=restoreMessage;
  }finally{busyState(false);if(!approvalToken)q.focus();}
+}
+function addDownload(file){
+ if(!/^\/api\/exports\/[a-f0-9]{24}\/\d+$/.test(file.download_path))return;
+ const button=document.createElement('button');button.type='button';button.className='link';
+ const label='Download STEP · '+file.filename;button.textContent=label;
+ button.onclick=async()=>{
+  if(!token.value.trim()){append('Enter the chat token to download this STEP file.');token.focus();return;}
+  button.disabled=true;button.textContent='Downloading STEP…';
+  try{
+   const r=await fetch(API_BASE+file.download_path,{headers:{Authorization:'Bearer '+token.value.trim()},signal:AbortSignal.timeout(90000)});
+   if(!r.ok){const j=await jsonResponse(r);throw new Error(j.error||`HTTP ${r.status}`);}
+   const blob=await r.blob();const url=URL.createObjectURL(blob);
+   const a=document.createElement('a');a.href=url;a.download=file.filename;a.click();
+   setTimeout(()=>URL.revokeObjectURL(url),1000);
+   append(`STEP download ready: ${file.filename} · ${blob.size.toLocaleString()} bytes`+(r.headers.get('X-Content-SHA256')?` · SHA-256 ${r.headers.get('X-Content-SHA256')}`:''));
+  }catch(e){append('STEP download failed: '+e.message);}
+  finally{button.disabled=false;button.textContent=label;}
+ };
+ log.appendChild(button);
 }
 document.getElementById('f').onsubmit=async e=>{
  e.preventDefault();const m=q.value.trim();if(!m||busy||approvalToken)return;
