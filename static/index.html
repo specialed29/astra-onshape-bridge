@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Astra ↔ Onshape</title>
 <style>
 body{font-family:system-ui;background:#0b0e13;color:#eef2f7;margin:0}.wrap{max-width:900px;margin:40px auto;padding:0 20px}
@@ -7,14 +7,49 @@ body{font-family:system-ui;background:#0b0e13;color:#eef2f7;margin:0}.wrap{max-w
 form{display:grid;grid-template-columns:1fr auto;gap:10px;padding:14px;border-top:1px solid #263043}
 textarea{min-height:70px;background:#0d121b;color:#eef2f7;border:1px solid #263043;border-radius:10px;padding:10px}
 button{border:0;border-radius:10px;padding:0 18px;font-weight:700}.u{text-align:right;margin:12px}.a{margin:12px;color:#cfd8e8}.muted{color:#96a4b8}
+input{background:#0d121b;color:#eef2f7;border:1px solid #263043;border-radius:8px;padding:12px;box-sizing:border-box;width:100%;margin:8px 0}
+button:disabled{opacity:.55;cursor:wait}button{min-height:44px;cursor:pointer}
+textarea{box-sizing:border-box;width:100%;font:inherit}label{display:block}#status{font-size:14px}#log{overflow-wrap:anywhere}
+.controls{margin:20px 0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+a{color:#b7cfff}:focus-visible{outline:2px solid #b7cfff;outline-offset:3px}
+@media(max-width:520px){.wrap{margin:24px auto;padding:0 16px}form{grid-template-columns:1fr}#log{min-height:220px}}
 </style></head>
 <body><div class="wrap"><h1>Astra ↔ Onshape</h1><p class="muted">Prompt-driven CAD through MCP.</p>
-<div class="panel"><div id="log">Try: “List my Onshape documents. Do not modify anything.”</div>
-<form id="f"><textarea id="q" required></textarea><button>Send</button></form></div></div>
+<p class="muted">Read-only verification mode. This chat cannot create, edit, or export CAD.</p>
+<div class="controls"><label for="token">Chat access token</label>
+<input id="token" type="password" autocomplete="off" placeholder="CHAT_BEARER_TOKEN from your Render environment" aria-describedby="token-help">
+<p id="token-help" class="muted">Held only in this page's memory. Never enter your OpenAI or Onshape keys here.</p>
+<div class="row"><button id="check" type="button">Check service</button><button id="reset" type="button">New conversation</button>
+<a href="/mcp-info" target="_blank" rel="noopener">MCP diagnostics</a></div>
+<p id="status" class="muted" role="status">Service not checked.</p></div>
+<div class="panel"><div id="log" role="log" aria-live="polite">Try: “List my Onshape documents. Do not modify anything.”</div>
+<form id="f"><label for="q">Message<textarea id="q" required maxlength="16000"></textarea></label><button id="send">Send</button></form></div></div>
 <script>
-let prev=null;const log=document.getElementById('log'),q=document.getElementById('q');
-document.getElementById('f').onsubmit=async e=>{e.preventDefault();const m=q.value.trim();if(!m)return;
-log.innerHTML+='<div class="u">'+m.replace(/[<>&]/g,s=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))+'</div>';q.value='';
-const r=await fetch('/api/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:m,previous_response_id:prev})});
-const j=await r.json();if(j.response_id)prev=j.response_id;log.innerHTML+='<div class="a">'+String(j.text||j.error||'No response').replace(/[<>&]/g,s=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))+'</div>';};
+const API_BASE=''; // Private sandbox preview rewrites only this constant in its own copy.
+let prev=null,busy=false;
+const log=document.getElementById('log'),q=document.getElementById('q'),token=document.getElementById('token');
+const send=document.getElementById('send'),status=document.getElementById('status'),reset=document.getElementById('reset');
+function append(text,kind='a'){const div=document.createElement('div');div.className=kind;div.textContent=text;log.appendChild(div);}
+async function jsonResponse(r){const text=await r.text();try{return JSON.parse(text);}catch{throw new Error(`HTTP ${r.status}: service returned a non-JSON response. Check deployment status.`);}}
+reset.onclick=()=>{if(busy)return;prev=null;log.textContent='New read-only conversation.';q.focus();};
+document.getElementById('check').onclick=async()=>{
+ status.textContent='Checking service…';
+ try{const r=await fetch(API_BASE+'/health',{signal:AbortSignal.timeout(90000)});const j=await jsonResponse(r);
+ if(!r.ok)throw new Error(`HTTP ${r.status}`);
+ status.textContent=`App: ${j.app?'online':'unavailable'} · Config: ${j.configured?'present (credentials not yet verified)':'missing'} · Model: ${j.model} · FastMCP: ${j.fastmcp_version||'not reported (old deployment)'}`;
+ }catch(e){status.textContent='Health check failed: '+e.message;}
+};
+document.getElementById('f').onsubmit=async e=>{
+ e.preventDefault();const m=q.value.trim();if(!m||busy)return;
+ if(!token.value.trim()){append('Enter the chat access token first. Do not enter API keys.');token.focus();return;}
+ busy=true;send.disabled=true;reset.disabled=true;send.textContent='Working…';
+ append(m,'u');q.value='';
+ try{
+ const r=await fetch(API_BASE+'/api/chat',{method:'POST',headers:{'content-type':'application/json','Authorization':'Bearer '+token.value.trim()},body:JSON.stringify({message:m,previous_response_id:prev}),signal:AbortSignal.timeout(110000)});
+ const j=await jsonResponse(r);if(!r.ok)throw new Error([j.error,j.upstream_status&&`upstream HTTP ${j.upstream_status}`,j.request_id&&`request ${j.request_id}`,j.hint].filter(Boolean).join(' · '));
+ if(j.response_id)prev=j.response_id;append(j.text||'No text returned. Inspect the tool status.');
+ if(j.tool_calls?.length)append('Tool status: '+j.tool_calls.map(t=>`${t.name}: ${t.error?'error':t.status||'completed'}`).join(', '));
+ }catch(e){append('Request failed: '+e.message);q.value=m;}
+ finally{busy=false;send.disabled=false;reset.disabled=false;send.textContent='Send';q.focus();}
+};
 </script></body></html>

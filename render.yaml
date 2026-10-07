@@ -3,7 +3,7 @@ services:
     name: astra-onshape-bridge
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && pip check && python -m unittest discover -s tests -v
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
@@ -16,3 +16,13 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-6-astra
+      - key: PYTHON_VERSION
+        value: 3.14.3
+      - key: ENABLE_CAD_WRITES
+        value: "false"
+      - key: ONSHAPE_AUTH_MODE
+        value: hmac
+      - key: MCP_BEARER_TOKEN
+        generateValue: true
+      - key: CHAT_BEARER_TOKEN
+        generateValue: true
