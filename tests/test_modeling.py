@@ -5,6 +5,7 @@ import os
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import httpx
 
 from starlette.testclient import TestClient
 import app
@@ -174,6 +175,32 @@ class ApprovalTests(unittest.TestCase):
 
 
 class MutationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_caps_document_pages_at_verified_size(self):
+        captured = {}
+
+        async def fake(method, path, **kwargs):
+            captured.update(kwargs)
+            return {"items": []}
+
+        with patch.object(app, "onshape_request", fake):
+            await app.search_documents("probe", 100, 20)
+        self.assertEqual(captured["params"]["limit"], 20)
+        self.assertEqual(captured["params"]["offset"], 20)
+
+    async def test_list_shaped_provider_validation_errors(self):
+        real_client = httpx.AsyncClient
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            400, json=[{"message": "Invalid page size"}], request=request
+        ))
+
+        def fake_client(**kwargs):
+            return real_client(**kwargs, transport=transport)
+
+        with patch.dict(os.environ, {"ONSHAPE_ACCESS_KEY": "test", "ONSHAPE_SECRET_KEY": "secret"}), \
+             patch.object(app.httpx, "AsyncClient", fake_client):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 400.*Invalid page size"):
+                await app.onshape_request("GET", "/api/v10/documents")
+
     async def test_rectangle_write_payload_and_feature_state(self):
         calls = []
 

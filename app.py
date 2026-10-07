@@ -166,7 +166,13 @@ async def onshape_request(
         if r.status_code in {400, 409, 422}:
             try:
                 data = r.json()
-                detail = str(data.get("message", data.get("error", "")))[:1200]
+                if isinstance(data, dict):
+                    detail = str(data.get("message", data.get("error", "")))[:1200]
+                elif isinstance(data, list):
+                    detail = "; ".join(
+                        str(item.get("message", item.get("error", item))) if isinstance(item, dict) else str(item)
+                        for item in data
+                    )[:1200]
             except ValueError:
                 pass
             for key in ("ONSHAPE_ACCESS_KEY", "ONSHAPE_SECRET_KEY", "OPENAI_API_KEY",
@@ -204,11 +210,11 @@ async def onshape_health() -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
 async def search_documents(query: str = "", limit: int = 20, offset: int = 0) -> Any:
-    """Search documents visible to the configured Onshape account. READ ONLY."""
+    """READ ONLY: search documents. Page size is capped at 20; use offset for subsequent pages."""
     return await onshape_request(
         "GET",
         "/api/v10/documents",
-        params={"q": query, "offset": max(0, offset), "limit": max(1, min(limit, 100))},
+        params={"q": query, "offset": max(0, offset), "limit": max(1, min(limit, 20))},
     )
 
 

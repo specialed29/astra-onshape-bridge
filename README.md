@@ -150,7 +150,7 @@ Read-only: `onshape_health`, `search_documents`, `get_document`, `list_elements`
 
 Typed mutations are listed above. Legacy operator-only tools: `add_feature_raw`, `export_partstudio_step`.
 
-Document search supports `offset` and `limit`. Do not mistake one returned page for the entire account.
+Document search supports `offset` and `limit`, with page size capped at the verified 20 items. Do not mistake one returned page for the entire account; request subsequent pages with offsets 20, 40, and so on.
 
 ## Failure isolation
 
