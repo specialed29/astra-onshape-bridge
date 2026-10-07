@@ -1,4 +1,4 @@
-fastmcp>=2.12,<3
+fastmcp>=4.0,<5
 openai>=2.5,<3
 httpx>=0.28,<1
 starlette>=0.48,<1
