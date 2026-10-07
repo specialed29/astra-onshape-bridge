@@ -1,5 +1,7 @@
 # Astra Onshape Bridge
 
+**Paused by owner request on October 7, 2026.** Production is gated by `BRIDGE_OFFLINE=true`, which returns 503 without dispatching chat, MCP, downloads, or the browser UI. `/health` returns 200 with `app=false, offline=true` solely for Render deployment health. This is application-level shutdown, not Render service suspension. No development or reactivation should occur without a new owner request; source, credentials, and Onshape documents are preserved.
+
 Browser chat → OpenAI Responses API (`gpt-6-astra`) → authenticated Streamable HTTP MCP → Onshape REST API.
 
 ## Typed modeling release

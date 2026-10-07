@@ -24,6 +24,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 import approvals
 import cad
 import step_export
+from offline import OfflineGate
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent
@@ -720,3 +721,4 @@ app = mcp.http_app(
     json_response=True,
     host_origin_protection=False,
 )
+app = OfflineGate(app)

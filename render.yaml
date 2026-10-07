@@ -6,7 +6,7 @@ services:
     buildCommand: pip install -r requirements.txt && pip check && python -m unittest discover -s tests -v
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeploy: false
     envVars:
       - key: OPENAI_API_KEY
         sync: false
@@ -19,6 +19,8 @@ services:
       - key: PYTHON_VERSION
         value: 3.14.3
       - key: ENABLE_CAD_WRITES
+        value: "false"
+      - key: BRIDGE_OFFLINE
         value: "true"
       - key: ENABLE_RAW_FEATURE_WRITES
         value: "false"
