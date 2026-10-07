@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Astra ↔ Onshape</title>
+<style>
+body{font-family:system-ui;background:#0b0e13;color:#eef2f7;margin:0}.wrap{max-width:900px;margin:40px auto;padding:0 20px}
+.panel{background:#121722;border:1px solid #263043;border-radius:16px;overflow:hidden}#log{min-height:420px;padding:18px;white-space:pre-wrap}
+form{display:grid;grid-template-columns:1fr auto;gap:10px;padding:14px;border-top:1px solid #263043}
+textarea{min-height:70px;background:#0d121b;color:#eef2f7;border:1px solid #263043;border-radius:10px;padding:10px}
+button{border:0;border-radius:10px;padding:0 18px;font-weight:700}.u{text-align:right;margin:12px}.a{margin:12px;color:#cfd8e8}.muted{color:#96a4b8}
+</style></head>
+<body><div class="wrap"><h1>Astra ↔ Onshape</h1><p class="muted">Prompt-driven CAD through MCP.</p>
+<div class="panel"><div id="log">Try: “List my Onshape documents. Do not modify anything.”</div>
+<form id="f"><textarea id="q" required></textarea><button>Send</button></form></div></div>
+<script>
+let prev=null;const log=document.getElementById('log'),q=document.getElementById('q');
+document.getElementById('f').onsubmit=async e=>{e.preventDefault();const m=q.value.trim();if(!m)return;
+log.innerHTML+='<div class="u">'+m.replace(/[<>&]/g,s=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))+'</div>';q.value='';
+const r=await fetch('/api/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:m,previous_response_id:prev})});
+const j=await r.json();if(j.response_id)prev=j.response_id;log.innerHTML+='<div class="a">'+String(j.text||j.error||'No response').replace(/[<>&]/g,s=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))+'</div>';};
+</script></body></html>
