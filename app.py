@@ -4,16 +4,17 @@ import hashlib
 import hmac
 import json
 import os
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from fastmcp.server.auth import StaticTokenVerifier
 from openai import OpenAI
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from starlette.routing import Route
+from starlette.responses import HTMLResponse, JSONResponse
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +28,37 @@ def configured() -> bool:
         and os.getenv("ONSHAPE_ACCESS_KEY")
         and os.getenv("ONSHAPE_SECRET_KEY")
     )
+
+
+def mcp_token() -> str:
+    explicit = os.getenv("MCP_BEARER_TOKEN")
+    if explicit:
+        return explicit
+    secret = os.getenv("ONSHAPE_SECRET_KEY", "unconfigured")
+    return hmac.new(
+        secret.encode(), b"astra-onshape-mcp-v2", hashlib.sha256
+    ).hexdigest()
+
+
+auth = StaticTokenVerifier(
+    tokens={
+        mcp_token(): {
+            "client_id": "openai-responses",
+            "sub": "astra-onshape-bridge",
+            "scopes": ["mcp:all"],
+        }
+    }
+)
+
+mcp = FastMCP(
+    "Astra Onshape Bridge",
+    auth=auth,
+    instructions=(
+        "Use these tools to inspect and operate the configured Onshape account. "
+        "Do not perform writes unless the user's current request explicitly asks for them. "
+        "Keep document/workspace/element IDs explicit in write operations."
+    ),
+)
 
 
 def onshape_request(
@@ -66,22 +98,17 @@ def onshape_request(
     }
 
 
-mcp = FastMCP(
-    "Astra Onshape Bridge",
-    instructions=(
-        "Use these tools to inspect and operate the configured Onshape account. "
-        "Do not perform writes unless the user's current request explicitly asks for them. "
-        "Keep document/workspace/element IDs explicit in write operations."
-    ),
-)
-
-
 @mcp.tool
 def onshape_health() -> dict[str, Any]:
     """Verify Onshape credentials with a minimal read."""
     if not configured():
         return {"ok": False, "reason": "Required secrets are not configured."}
-    return {"ok": True, "sample": onshape_request("GET", "/api/v10/documents", params={"limit": 1})}
+    return {
+        "ok": True,
+        "sample": onshape_request(
+            "GET", "/api/v10/documents", params={"limit": 1}
+        ),
+    }
 
 
 @mcp.tool
@@ -110,7 +137,9 @@ def list_elements(document_id: str, workspace_id: str) -> Any:
 
 
 @mcp.tool
-def get_partstudio_features(document_id: str, workspace_id: str, element_id: str) -> Any:
+def get_partstudio_features(
+    document_id: str, workspace_id: str, element_id: str
+) -> Any:
     """Inspect the complete feature list in a Part Studio. READ ONLY."""
     return onshape_request(
         "GET",
@@ -164,16 +193,6 @@ def get_translation(translation_id: str) -> Any:
     return onshape_request("GET", f"/api/v10/translations/{translation_id}")
 
 
-def mcp_token() -> str:
-    explicit = os.getenv("MCP_BEARER_TOKEN")
-    if explicit:
-        return explicit
-    secret = os.getenv("ONSHAPE_SECRET_KEY", "unconfigured")
-    return hmac.new(
-        secret.encode(), b"astra-onshape-mcp-v1", hashlib.sha256
-    ).hexdigest()
-
-
 def public_base(request: Request) -> str | None:
     explicit = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
     if explicit:
@@ -188,43 +207,72 @@ def public_base(request: Request) -> str | None:
     return None
 
 
+@mcp.custom_route("/", methods=["GET"])
 async def index(request: Request):
     return HTMLResponse((ROOT / "static" / "index.html").read_text(encoding="utf-8"))
 
 
+@mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request):
     return JSONResponse(
         {
             "app": True,
             "configured": configured(),
             "model": MODEL,
+            "fastmcp_version": version("fastmcp"),
             "public_base_url": public_base(request),
         }
     )
 
 
+@mcp.custom_route("/mcp-info", methods=["GET"])
+async def mcp_info(request: Request):
+    return JSONResponse(
+        {
+            "transport": "streamable-http",
+            "endpoint": "/mcp",
+            "auth": "bearer",
+            "fastmcp_version": version("fastmcp"),
+        }
+    )
+
+
+@mcp.custom_route("/api/chat", methods=["POST"])
 async def chat(request: Request):
     if not configured():
         return JSONResponse(
-            {"error": "Add OPENAI_API_KEY, ONSHAPE_ACCESS_KEY, and ONSHAPE_SECRET_KEY in Render."},
+            {
+                "error": (
+                    "Add OPENAI_API_KEY, ONSHAPE_ACCESS_KEY, and "
+                    "ONSHAPE_SECRET_KEY in Render."
+                )
+            },
             status_code=503,
         )
+
     data = await request.json()
     message = str(data.get("message", "")).strip()
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
+
     base = public_base(request)
     if not base:
-        return JSONResponse({"error": "Could not determine public service URL."}, status_code=500)
+        return JSONResponse(
+            {"error": "Could not determine public service URL."},
+            status_code=500,
+        )
 
     tool = {
         "type": "mcp",
         "server_label": "onshape_cad",
-        "server_description": "Inspect Onshape documents, modify Part Studio features, and export STEP.",
+        "server_description": (
+            "Inspect Onshape documents, modify Part Studio features, and export STEP."
+        ),
         "server_url": f"{base}/mcp",
         "authorization": mcp_token(),
         "require_approval": "never",
     }
+
     kwargs: dict[str, Any] = {
         "model": MODEL,
         "instructions": (
@@ -235,6 +283,7 @@ async def chat(request: Request):
         "input": message,
         "tools": [tool],
     }
+
     if data.get("previous_response_id"):
         kwargs["previous_response_id"] = data["previous_response_id"]
 
@@ -242,31 +291,14 @@ async def chat(request: Request):
         r = OpenAI(api_key=os.environ["OPENAI_API_KEY"]).responses.create(**kwargs)
         return JSONResponse({"text": r.output_text, "response_id": r.id})
     except Exception as e:
-        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+        return JSONResponse(
+            {"error": f"{type(e).__name__}: {e}"},
+            status_code=500,
+        )
 
 
-class MCPBearerMiddleware:
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope.get("path", "").startswith("/mcp"):
-            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-            auth = headers.get("authorization", "")
-            token = mcp_token()
-            if auth not in {token, f"Bearer {token}"}:
-                response = PlainTextResponse("Unauthorized", status_code=401)
-                await response(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
-
-
-app = mcp.http_app(stateless_http=True)
-app.router.routes.extend(
-    [
-        Route("/", index, methods=["GET"]),
-        Route("/health", health, methods=["GET"]),
-        Route("/api/chat", chat, methods=["POST"]),
-    ]
+app = mcp.http_app(
+    path="/mcp",
+    stateless_http=True,
+    host_origin_protection=False,
 )
-app.add_middleware(MCPBearerMiddleware)
