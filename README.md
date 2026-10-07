@@ -2,15 +2,43 @@
 
 Browser chat → OpenAI Responses API (`gpt-6-astra`) → authenticated Streamable HTTP MCP → Onshape REST API.
 
-## Current safety boundary
+## Typed modeling release
 
-This release is a **read-only commissioning baseline**. The browser imports only six read-only tools. The three mutation/export tools remain discoverable for protocol compatibility, but reject execution unless `ENABLE_CAD_WRITES=true`. Leave it false during commissioning. A prompt is not an authorization boundary.
+The bridge now includes native rectangle/circle sketches, NEW solid extrusions, dimensional edits, and geometry inspection. This is the initial modeling toolset, not a general-purpose feature authoring system. Live creation/edit commissioning must be performed on a specifically approved disposable document before assuming all payloads work for a production part.
 
-The existing raw-feature tool is not a complete CAD authoring system: there is no typed sketch/extrusion vocabulary, feature-update tool, geometry validation, approval UI, or complete STEP download flow yet. Do not interpret successful tool discovery as validation of CAD generation or export.
+In browser chat, each mutation produces an OpenAI MCP approval request. The UI shows the server, tool, exact arguments with defaults, target IDs, dimensions, and document visibility, then pauses for **Approve** or **Deny**. No approval is inferred from the model's prose. A server-side, one-use review token binds the decision to the original response and arguments; the browser cannot substitute different arguments or a different response ID.
+
+Review tokens expire after 30 minutes or a service restart. Do not run multiple Uvicorn workers or multiple Render instances with this in-memory approval store; migrate it to a shared, durable store before scaling. On timeout, a mutation's outcome can be unknown: inspect Onshape before requesting a replacement action, and never blindly retry.
+
+### Current tools
+
+| Tool | Scope |
+|---|---|
+| `create_document` | New document; `is_public=false` by default, with no silent fallback to public |
+| `create_partstudio` | New Part Studio tab in an explicit document/workspace |
+| `create_rectangle_sketch` | Width/height dimensions in mm; fixed lower-left vertex at `x_mm,y_mm`; default plane |
+| `create_circle_sketch` | Diameter in mm; fixed center at `x_mm,y_mm`; default plane |
+| `extrude_sketch` | All closed regions of a specified sketch into NEW solids, with explicit depth in mm |
+| `set_feature_dimension` | Bridge sketch width/height/diameter or NEW/BLIND extrusion depth; retains feature ID |
+| `inspect_partstudio_geometry` | Read-only actual parts, bounding boxes, and mass properties |
+
+The other six read-only tools remain available. `add_feature_raw` and `export_partstudio_step` remain outside the browser toolset; raw writes require a second independent `ENABLE_RAW_FEATURE_WRITES=true` operator setting and are disabled by default. Cut/add/intersect operations, holes, fillets, arbitrary drawings, assemblies, materials, and STEP downloads are not exposed by this modeling release.
+
+New feature writes read the current `sourceMicroversion` and use `rejectMicroversionSkew=true` to reject intervening changes. HTTP success is not geometric success: tools report `ok=true` only when the returned feature state is `OK`, and the assistant is instructed to inspect real geometry afterward. A failed feature can still exist in the feature tree; it is never silently deleted or re-created.
+
+Refresh the browser and start **New conversation** after deployment so earlier read-only MCP tool-list context is not reused. Example request: “Create a private document named My First Plate, sketch a 40 × 30 mm rectangle on Top, and extrude it 8 mm. Ask me to approve each write.” This is an example, not authorization to execute it.
+
+## Server safety switches
+
+With `ENABLE_CAD_WRITES=false`, the browser is read-only and all Onshape non-GET requests are blocked. With `ENABLE_CAD_WRITES=true`, browser chat imports the six typed modeling mutations and requires approval for every one; read tools do not require approval. A prompt is not an authorization boundary.
+
+The MCP bearer token is an operator credential: a separate trusted MCP client using it directly can invoke enabled mutations without going through this browser's approval UI. Do not give that token to untrusted clients or embed it in the browser. The browser uses only the separate chat token, while OpenAI applies the configured MCP approval policy.
 
 ## Deployment
 
 Use the included Render Blueprint. Python 3.14.3 and direct dependency versions are pinned to the tested runtime. The Blueprint build runs dependency checks and offline tests:
+
+The modeling Blueprint enables `ENABLE_CAD_WRITES=true` and keeps `ENABLE_RAW_FEATURE_WRITES=false`; browser approvals remain mandatory. Set the former to false if you want a read-only deployment.
 
 ```sh
 pip install -r requirements.txt
@@ -39,6 +67,7 @@ Use `/health` as the Render health-check path. It is a liveness/configuration-pr
 | `MCP_BEARER_TOKEN` | High-entropy MCP token; Blueprint generates one. If omitted, derived server-side from the Onshape secret |
 | `CHAT_BEARER_TOKEN` | Separate high-entropy browser-chat token; Blueprint generates one. Falls back to the MCP token if absent |
 | `ENABLE_CAD_WRITES` | Defaults to `false`; guards all non-GET Onshape requests, including export jobs |
+| `ENABLE_RAW_FEATURE_WRITES` | Defaults to `false`; independent guard on raw feature writes; never exposed in browser chat |
 | `ONSHAPE_AUTH_MODE` | Defaults to `hmac`; `basic` is available for explicit diagnostic comparison |
 | `PYTHON_VERSION` | Pinned to `3.14.3` on Render |
 
@@ -52,7 +81,7 @@ Never commit `.env`, put provider API keys in the browser, or copy tokens into l
 | `GET /health` | Public liveness, versions, commit, presence-only environment booleans |
 | `GET /mcp-info` | Public transport metadata; no credentials |
 | `POST /mcp` | FastMCP-native bearer authentication; JSON-RPC Streamable HTTP |
-| `POST /api/chat` | Chat bearer token; read-only Responses API calls |
+| `POST /api/chat` | Chat bearer token; reads and typed modeling, with required MCP approval for each mutation |
 | `GET /api/diagnostics/onshape` | Chat bearer token; direct `GET /api/v10/documents?limit=1&offset=0`, bypassing MCP and OpenAI; returns count, not document contents |
 
 The diagnostic endpoint accepts `?auth_mode=hmac` or `?auth_mode=basic` without changing service configuration.
@@ -72,7 +101,7 @@ This checks, in order:
 1. Public routes.
 2. Authenticated `initialize`.
 3. `notifications/initialized`.
-4. `tools/list`, verifying all nine expected names.
+4. `tools/list`, verifying the current read/modeling/legacy tool definitions.
 5. A fresh OpenAI Responses request and its actual `mcp_list_tools` output item. Approval is required for every tool call in this discovery probe, so no tool can execute.
 6. A direct Onshape document-list GET, outside MCP/OpenAI.
 7. A read-only `/api/chat` request and completed `search_documents` trace.
@@ -117,9 +146,9 @@ In the Responses tool configuration, `authorization` is the **raw token**, witho
 
 ### Tools
 
-Read-only: `onshape_health`, `search_documents`, `get_document`, `list_elements`, `get_partstudio_features`, `get_translation`.
+Read-only: `onshape_health`, `search_documents`, `get_document`, `list_elements`, `get_partstudio_features`, `get_translation`, `inspect_partstudio_geometry`.
 
-Guarded mutations/export: `create_document`, `add_feature_raw`, `export_partstudio_step`.
+Typed mutations are listed above. Legacy operator-only tools: `add_feature_raw`, `export_partstudio_step`.
 
 Document search supports `offset` and `limit`. Do not mistake one returned page for the entire account.
 
@@ -143,15 +172,15 @@ HMAC signs the exact encoded pathname and query, includes a trailing newline, us
 
 Redirects are not followed automatically: a signed redirect needs a newly validated target and a fresh signature. This especially matters for future file downloads.
 
-## STEP and parametric CAD follow-up
+## STEP follow-up
 
 The existing format-specific STEP export endpoint is valid in the published API: `POST /partstudios/d/{did}/{wv}/{wvid}/e/{eid}/export/step`. It initiates asynchronous translation, not a file download. See [Onshape import/export documentation](https://onshape-public.github.io/docs/api-adv/translation/).
 
 After explicit authorization for a disposable test document, the next commissioning phase should:
 
-1. Add typed feature creation/update with explicit units, IDs, and feature-state validation.
-2. Require review of each write's target and complete payload.
-3. Create and edit a small parametric test part, preserving editability in Onshape.
+1. Commission the typed sketch/extrusion/edit tools on a disposable document.
+2. Verify feature states, actual part geometry, and dimensional updates.
+3. Extend the review-controlled toolset for the next requested part's features.
 4. Start STEP export with `storeInDocument=false` unless a new blob tab is explicitly wanted.
 5. Poll translation to `DONE`, handle `FAILED`, retrieve the resulting external data or blob, safely re-sign redirects, and stream bytes instead of truncating text into a tool response.
 6. Validate the STEP payload and provide an authenticated download.

@@ -19,6 +19,8 @@ services:
       - key: PYTHON_VERSION
         value: 3.14.3
       - key: ENABLE_CAD_WRITES
+        value: "true"
+      - key: ENABLE_RAW_FEATURE_WRITES
         value: "false"
       - key: ONSHAPE_AUTH_MODE
         value: hmac

@@ -11,45 +11,90 @@ input{background:#0d121b;color:#eef2f7;border:1px solid #263043;border-radius:8p
 button:disabled{opacity:.55;cursor:wait}button{min-height:44px;cursor:pointer}
 textarea{box-sizing:border-box;width:100%;font:inherit}label{display:block}#status{font-size:14px}#log{overflow-wrap:anywhere}
 .controls{margin:20px 0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.review{margin:20px 0;padding:20px;border:1px solid #bca36b;border-radius:12px;background:#191a1b}
+.review h2{font-size:20px;margin:0 0 12px}.review pre{overflow:auto;max-height:360px;font-size:13px;line-height:1.5;background:#0d121b;padding:12px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+.review p{line-height:1.5}.review [id="approve"]{background:#e9cd91;color:#181a1e}.review [id="deny"]{background:#252c36;color:#eef2f7}
+[hidden]{display:none!important}#mode{line-height:1.5}.link{display:block;margin:12px}
 a{color:#b7cfff}:focus-visible{outline:2px solid #b7cfff;outline-offset:3px}
 @media(max-width:520px){.wrap{margin:24px auto;padding:0 16px}form{grid-template-columns:1fr}#log{min-height:220px}}
 </style></head>
 <body><div class="wrap"><h1>Astra ↔ Onshape</h1><p class="muted">Prompt-driven CAD through MCP.</p>
-<p class="muted">Read-only verification mode. This chat cannot create, edit, or export CAD.</p>
+<p class="muted" id="mode">Checking modeling availability. CAD writes require an explicit approval.</p>
 <div class="controls"><label for="token">Chat access token</label>
 <input id="token" type="password" autocomplete="off" placeholder="CHAT_BEARER_TOKEN from your Render environment" aria-describedby="token-help">
 <p id="token-help" class="muted">Held only in this page's memory. Never enter your OpenAI or Onshape keys here.</p>
 <div class="row"><button id="check" type="button">Check service</button><button id="reset" type="button">New conversation</button>
 <a href="/mcp-info" target="_blank" rel="noopener">MCP diagnostics</a></div>
 <p id="status" class="muted" role="status">Service not checked.</p></div>
-<div class="panel"><div id="log" role="log" aria-live="polite">Try: “List my Onshape documents. Do not modify anything.”</div>
+<section id="review" class="review" aria-labelledby="review-title" hidden>
+<h2 id="review-title">Review CAD write</h2>
+<p>This will change the connected Onshape account. Check the document, workspace, Part Studio, dimensions, and visibility before approving. Nothing in this request has executed yet.</p>
+<div id="review-items"></div>
+<div class="row"><button id="approve" type="button">Approve reviewed operation</button><button id="deny" type="button">Deny operation</button></div>
+<p class="muted">Each approval is single-use and expires after 30 minutes or a server restart. A new write requires another review. If a write times out, inspect Onshape before retrying.</p>
+</section>
+<div class="panel"><div id="log" role="log" aria-live="polite">Inspect your existing parts, or describe a new rectangular or cylindrical part with dimensions in millimeters. Every CAD write pauses for review.</div>
 <form id="f"><label for="q">Message<textarea id="q" required maxlength="16000"></textarea></label><button id="send">Send</button></form></div></div>
 <script>
 const API_BASE=''; // Private sandbox preview rewrites only this constant in its own copy.
-let prev=null,busy=false;
+let prev=null,busy=false,approvalToken=null;
 const log=document.getElementById('log'),q=document.getElementById('q'),token=document.getElementById('token');
 const send=document.getElementById('send'),status=document.getElementById('status'),reset=document.getElementById('reset');
+const review=document.getElementById('review'),approve=document.getElementById('approve'),deny=document.getElementById('deny');
 function append(text,kind='a'){const div=document.createElement('div');div.className=kind;div.textContent=text;log.appendChild(div);}
 async function jsonResponse(r){const text=await r.text();try{return JSON.parse(text);}catch{throw new Error(`HTTP ${r.status}: service returned a non-JSON response. Check deployment status.`);}}
-reset.onclick=()=>{if(busy)return;prev=null;log.textContent='New read-only conversation.';q.focus();};
-document.getElementById('check').onclick=async()=>{
+function busyState(value){busy=value;send.disabled=value||!!approvalToken;q.disabled=value||!!approvalToken;reset.disabled=value;approve.disabled=value;deny.disabled=value;send.textContent=value?'Working…':'Send';}
+function displayApproval(j){
+ approvalToken=j.approval_token||null;review.hidden=!approvalToken;
+ const items=document.getElementById('review-items');items.replaceChildren();
+ for(const item of j.approval_requests||[]){
+  const heading=document.createElement('h3');heading.textContent=item.name;items.appendChild(heading);
+  const pre=document.createElement('pre');pre.textContent=JSON.stringify({server:item.server_label,tool:item.name,arguments:item.effective_arguments||JSON.parse(item.arguments)},null,2);items.appendChild(pre);
+ }
+ const multiple=(j.approval_requests||[]).length>1;
+ approve.textContent=multiple?'Approve all reviewed operations':'Approve reviewed operation';
+ deny.textContent=multiple?'Deny all operations':'Deny operation';
+ if(approvalToken)review.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+reset.onclick=()=>{if(busy)return;prev=null;approvalToken=null;review.hidden=true;busyState(false);log.textContent='New conversation. Any previous unapproved request will not be executed by this page.';q.focus();};
+async function checkService(){
  status.textContent='Checking service…';
  try{const r=await fetch(API_BASE+'/health',{signal:AbortSignal.timeout(90000)});const j=await jsonResponse(r);
  if(!r.ok)throw new Error(`HTTP ${r.status}`);
  status.textContent=`App: ${j.app?'online':'unavailable'} · Config: ${j.configured?'present (credentials not yet verified)':'missing'} · Model: ${j.model} · FastMCP: ${j.fastmcp_version||'not reported (old deployment)'}`;
+ document.getElementById('mode').textContent=j.writes_enabled?'Typed modeling enabled: rectangle/circle sketches, new solid extrusions, and dimensional edits. Every write requires review; raw feature writes are not available in this chat.':'Read-only mode. CAD writes are currently disabled on the server.';
  }catch(e){status.textContent='Health check failed: '+e.message;}
-};
-document.getElementById('f').onsubmit=async e=>{
- e.preventDefault();const m=q.value.trim();if(!m||busy)return;
+}
+document.getElementById('check').onclick=checkService;
+async function requestChat(payload,restoreMessage=''){
  if(!token.value.trim()){append('Enter the chat access token first. Do not enter API keys.');token.focus();return;}
- busy=true;send.disabled=true;reset.disabled=true;send.textContent='Working…';
- append(m,'u');q.value='';
+ busyState(true);
  try{
- const r=await fetch(API_BASE+'/api/chat',{method:'POST',headers:{'content-type':'application/json','Authorization':'Bearer '+token.value.trim()},body:JSON.stringify({message:m,previous_response_id:prev}),signal:AbortSignal.timeout(110000)});
+ const r=await fetch(API_BASE+'/api/chat',{method:'POST',headers:{'content-type':'application/json','Authorization':'Bearer '+token.value.trim()},body:JSON.stringify(payload),signal:AbortSignal.timeout(110000)});
  const j=await jsonResponse(r);if(!r.ok)throw new Error([j.error,j.upstream_status&&`upstream HTTP ${j.upstream_status}`,j.request_id&&`request ${j.request_id}`,j.hint].filter(Boolean).join(' · '));
- if(j.response_id)prev=j.response_id;append(j.text||'No text returned. Inspect the tool status.');
+ if(j.response_id)prev=j.response_id;
+ append(j.text||(j.approval_token?'Awaiting your review. No pending write has executed.':'No text returned. Inspect the tool status.'));
  if(j.tool_calls?.length)append('Tool status: '+j.tool_calls.map(t=>`${t.name}: ${t.error?'error':t.status||'completed'}`).join(', '));
- }catch(e){append('Request failed: '+e.message);q.value=m;}
- finally{busy=false;send.disabled=false;reset.disabled=false;send.textContent='Send';q.focus();}
+ for(const url of j.onshape_links||[]){try{const u=new URL(url);if(u.protocol==='https:'&&u.hostname.endsWith('.onshape.com')){const a=document.createElement('a');a.href=url;a.textContent='Open in Onshape';a.target='_blank';a.rel='noopener noreferrer';a.className='link';log.appendChild(a);}}catch{}}
+ displayApproval(j);
+ }catch(e){
+  append('Request failed: '+e.message+(payload.approval_token?' This approval will not be retried automatically. Inspect Onshape before requesting another write.':''));
+  if(payload.approval_token){approvalToken=null;review.hidden=true;prev=null;}
+  else q.value=restoreMessage;
+ }finally{busyState(false);if(!approvalToken)q.focus();}
+}
+document.getElementById('f').onsubmit=async e=>{
+ e.preventDefault();const m=q.value.trim();if(!m||busy||approvalToken)return;
+ if(!token.value.trim()){append('Enter the chat access token first. Do not enter API keys.');token.focus();return;}
+ append(m,'u');q.value='';await requestChat({message:m,previous_response_id:prev},m);
 };
+async function decide(approveWrite){
+ if(busy||!approvalToken)return;
+ if(!token.value.trim()){append('Enter your chat token before making this decision.');token.focus();return;}
+ const pending=approvalToken;approvalToken=null;review.hidden=true;
+ append(approveWrite?'Approved the displayed operation(s).':'Denied the displayed operation(s).','u');
+ await requestChat({approval_token:pending,approve:approveWrite});
+}
+approve.onclick=()=>decide(true);deny.onclick=()=>decide(false);
+checkService();
 </script></body></html>
