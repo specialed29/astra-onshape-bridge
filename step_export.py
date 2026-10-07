@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
+import zipfile
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
@@ -57,6 +59,38 @@ def validate_step(data: bytes) -> dict:
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
+def unpack_step(data: bytes) -> bytes:
+    """Onshape wraps even a single STEP result in ZIP on some export paths.
+
+    Never extract paths to disk. Accept exactly one STEP member; cap both the
+    compressed download and actual decompressed bytes and let ZipFile check CRC.
+    """
+    if not data.startswith(b"PK"):
+        validate_step(data)
+        return data
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            members = [item for item in archive.infolist() if not item.is_dir()]
+            if len(members) != 1 or not members[0].filename.lower().endswith((".step", ".stp")):
+                raise ValueError("Export ZIP must contain exactly one STEP file; multi-file archives are unsupported.")
+            member = members[0]
+            if member.flag_bits & 1:
+                raise ValueError("Encrypted export archives are unsupported.")
+            if member.file_size > MAX_BYTES:
+                raise ValueError("Uncompressed STEP exceeds the 32 MiB limit.")
+            output = bytearray()
+            with archive.open(member) as stream:
+                while chunk := stream.read(65536):
+                    if len(output) + len(chunk) > MAX_BYTES:
+                        raise ValueError("Uncompressed STEP exceeds the 32 MiB limit.")
+                    output.extend(chunk)
+            result = bytes(output)
+            validate_step(result)
+            return result
+    except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as error:
+        raise ValueError("Invalid or unsupported STEP export archive.") from error
+
+
 async def download(base: str, path: str, access: str, secret: str, mode: str, signer) -> bytes:
     if mode not in {"hmac", "basic"}:
         raise ValueError("ONSHAPE_AUTH_MODE must be hmac or basic.")
@@ -92,9 +126,7 @@ async def download(base: str, path: str, access: str, secret: str, mode: str, si
                     if len(data) + len(chunk) > MAX_BYTES:
                         raise ValueError("STEP download exceeds the 32 MiB limit.")
                     data.extend(chunk)
-                result = bytes(data)
-                validate_step(result)
-                return result
+                return unpack_step(bytes(data))
             finally:
                 await response.aclose()
     raise RuntimeError("Too many export redirects.")

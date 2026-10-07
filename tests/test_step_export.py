@@ -1,5 +1,7 @@
 import json
+import io
 import os
+import zipfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -33,6 +35,27 @@ class StepTests(unittest.IsolatedAsyncioTestCase):
         for data in [b"<html>Login</html>", b'{"error":"bad"}', b"PK", STEP[:-25]]:
             with self.assertRaises(ValueError):
                 step_export.validate_step(data)
+
+    def test_single_step_zip_and_rejection_cases(self):
+        def zipped(files):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, data in files:
+                    archive.writestr(name, data)
+            return buffer.getvalue()
+        blob = zipped([("Part Studio 1.step", STEP)])
+        self.assertEqual(step_export.unpack_step(blob), STEP)
+        # Names never become filesystem paths; member bytes are handled in memory.
+        self.assertEqual(step_export.unpack_step(zipped([("../part.step", STEP)])), STEP)
+        for files in [[], [("a.step", STEP), ("b.step", STEP)], [("part.html", STEP)],
+                      [("a.step", b"not STEP")]]:
+            with self.assertRaises(ValueError):
+                step_export.unpack_step(zipped(files))
+        with patch.object(step_export, "MAX_BYTES", 8):
+            with self.assertRaises(ValueError):
+                step_export.unpack_step(blob)
+        with self.assertRaises(ValueError):
+            step_export.unpack_step(b"PKbad archive")
 
     def test_redirect_allowlist(self):
         base = "https://cad.onshape.com"
